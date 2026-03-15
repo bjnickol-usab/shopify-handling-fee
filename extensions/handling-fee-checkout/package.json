@@ -1,5 +1,8 @@
 {
   "name": "handling-fee-checkout",
   "version": "1.0.0",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "@shopify/ui-extensions-react": "2025.7.4"
+  }
 }

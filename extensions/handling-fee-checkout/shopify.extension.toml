@@ -1,13 +1,12 @@
-api_version = "2026-01"
+api_version = "2025-07"
 
 [[extensions]]
 name = "Handling Fee Checkout Extension"
 handle = "handling-fee-checkout"
-uid = "18ea2d5a-008f-81c1-217a-86f71719bdedde2e3160"
 type = "ui_extension"
 
   [[extensions.targeting]]
-  module = "./src/Checkout.js"
+  module = "./src/Checkout.jsx"
   target = "purchase.checkout.cart-line-list.render-after"
 
 [extensions.capabilities]
