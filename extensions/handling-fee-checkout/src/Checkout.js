@@ -1,9 +1,12 @@
-import { extension } from "@shopify/ui-extensions/checkout";
+// @ts-check
+// shopify.extend is a global injected by the Shopify CLI runtime
 
-// Your Vercel app URL - already set to your production URL
 const APP_URL = "https://shopify-handling-fee.vercel.app";
 
-export default extension(
+// Set to true to show a debug banner at checkout - useful for troubleshooting
+const DEBUG = true;
+
+shopify.extend(
   "purchase.checkout.cart-line-list.render-after",
   async (root, api) => {
     const { lines, applyCartLinesChange, shop } = api;
@@ -11,6 +14,27 @@ export default extension(
     let isApplying = false;
     let lastSignature = "";
 
+    // ── Debug banner ──────────────────────────────────────────────────────
+    let debugEl = null;
+    function showDebug(msg) {
+      if (!DEBUG) return;
+      console.log("[HandlingFee]", msg);
+      if (!debugEl) {
+        debugEl = root.createComponent("BlockStack", { spacing: "none" });
+        const banner = root.createComponent("Banner", { status: "info" });
+        debugEl.appendChild(banner);
+        root.appendChild(debugEl);
+      }
+      // Update text - clear and re-add
+      while (debugEl.firstChild) debugEl.removeChild(debugEl.firstChild);
+      const banner = root.createComponent("Banner", { status: "info" });
+      const text = root.createComponent("Text");
+      text.appendChild(root.createText("[Handling Fee Debug] " + msg));
+      banner.appendChild(text);
+      debugEl.appendChild(banner);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────
     function buildSignature(currentLines) {
       return currentLines
         .filter(
@@ -29,7 +53,6 @@ export default extension(
           line.merchandise?.title?.toLowerCase().includes("handling fee") ||
           line.attributes?.some((a) => a.key === "_handling_fee")
       );
-
       for (const line of feeLines) {
         try {
           await applyCartLinesChange({
@@ -38,7 +61,7 @@ export default extension(
             quantity: line.quantity,
           });
         } catch (err) {
-          console.error("Error removing fee line:", err);
+          console.error("[HandlingFee] Error removing fee line:", err);
         }
       }
     }
@@ -58,28 +81,40 @@ export default extension(
 
       if (nonFeeLines.length === 0) {
         await removeExistingFeeLines(currentLines);
+        showDebug("Cart is empty or only contains fee lines — removed fees.");
         return;
       }
 
       isApplying = true;
+      showDebug(`Checking ${nonFeeLines.length} cart item(s)...`);
 
       try {
+        const shopDomain =
+          shop?.myshopifyDomain ||
+          shop?.domain ||
+          "";
+
+        if (!shopDomain) {
+          showDebug("ERROR: Could not determine shop domain from checkout API.");
+          isApplying = false;
+          return;
+        }
+
         const cartItems = nonFeeLines.map((line) => ({
           productId: line.merchandise?.product?.id,
           variantId: line.merchandise?.id,
           quantity: line.quantity,
           price: parseFloat(
             line.cost?.amountPerQuantity?.amount ||
-            line.merchandise?.price?.amount ||
-            "0"
+              line.merchandise?.price?.amount ||
+              "0"
           ),
           collectionIds: [],
         }));
 
-        const shopDomain =
-          shop?.myshopifyDomain ||
-          shop?.domain ||
-          "";
+        showDebug(
+          `Shop: ${shopDomain} | Items: ${cartItems.map((i) => i.productId).join(", ")}`
+        );
 
         const response = await fetch(`${APP_URL}/api/fees`, {
           method: "POST",
@@ -87,29 +122,42 @@ export default extension(
             "Content-Type": "application/json",
             "X-Shopify-Shop-Domain": shopDomain,
           },
-          body: JSON.stringify({
-            shopDomain,
-            cartItems,
-          }),
+          body: JSON.stringify({ shopDomain, cartItems }),
         });
 
         if (!response.ok) {
-          console.error("Fee API error:", response.status);
+          showDebug(`ERROR: API returned HTTP ${response.status}`);
           isApplying = false;
           return;
         }
 
         const data = await response.json();
+        showDebug(
+          `API response: fees=${JSON.stringify(data.fees)}, variantGid=${data.variantGid}`
+        );
 
-        // Remove existing fee lines before adding new ones
-        await removeExistingFeeLines(currentLines);
-
-        if (!data.fees || data.fees.length === 0 || !data.variantGid) {
+        if (data.error) {
+          showDebug(`API error: ${data.error}`);
           isApplying = false;
           return;
         }
 
-        // Add new fee line(s)
+        await removeExistingFeeLines(currentLines);
+
+        if (!data.variantGid) {
+          showDebug(
+            "No variantGid — go to app Settings and click Create Handling Fee Product."
+          );
+          isApplying = false;
+          return;
+        }
+
+        if (!data.fees || data.fees.length === 0) {
+          showDebug("No fees matched for items in this cart.");
+          isApplying = false;
+          return;
+        }
+
         for (const fee of data.fees) {
           await applyCartLinesChange({
             type: "addCartLine",
@@ -122,17 +170,20 @@ export default extension(
             ],
           });
         }
+
+        showDebug(`✓ Applied ${data.fees.length} fee(s): ${data.fees.map((f) => f.label + " $" + f.amount).join(", ")}`);
       } catch (err) {
-        console.error("Handling fee extension error:", err);
+        showDebug(`EXCEPTION: ${err.message}`);
+        console.error("[HandlingFee] Error:", err);
       } finally {
         isApplying = false;
       }
     }
 
-    // Run on initial load
+    // ── Run ───────────────────────────────────────────────────────────────
+    showDebug("Extension loaded — checking cart...");
     await applyFees(lines.current);
 
-    // Subscribe to cart line changes
     lines.subscribe(async (currentLines) => {
       await applyFees(currentLines);
     });
