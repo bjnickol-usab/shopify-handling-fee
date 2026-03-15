@@ -1,0 +1,8 @@
+{
+  "name": "handling-fee-checkout",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@shopify/ui-extensions": "^2024.10.3"
+  }
+}

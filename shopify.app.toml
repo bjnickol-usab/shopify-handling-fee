@@ -1,0 +1,28 @@
+name = "handling-fee-app"
+client_id = "340397f6aeff9a965433da26ac02919f"
+application_url = "https://shopify-handling-fee.vercel.app/app"
+embedded = true
+
+[build]
+automatically_update_urls_on_dev = true
+dev_store_url = "your-dev-store.myshopify.com"
+
+[access_scopes]
+scopes = "read_products,write_products"
+
+[auth]
+redirect_urls = [
+  "https://shopify-handling-fee.vercel.app/auth/callback",
+  "https://shopify-handling-fee.vercel.app/auth/shopify/callback",
+  "https://shopify-handling-fee.vercel.app/api/auth/callback"
+]
+
+[webhooks]
+api_version = "2025-01"
+
+  [[webhooks.subscriptions]]
+  topics = ["app/uninstalled"]
+  uri = "/webhooks/app-uninstalled"
+
+[pos]
+embedded = false

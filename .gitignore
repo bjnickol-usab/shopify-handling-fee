@@ -1,0 +1,13 @@
+node_modules/
+.env
+.shopify/
+build/
+.vercel/
+*.log
+.DS_Store
+.cache/
+dist/
+.shopify-cli.yml
+shopify.app.*.toml
+.env.local
+.env.production
