@@ -15,6 +15,7 @@ import {
   Toast,
   Frame,
   FormLayout,
+  InlineStack,
 } from "@shopify/polaris";
 import { authenticate } from "../shopify.server.js";
 import { getAppSettings, updateAppSettings } from "../db.server.js";
@@ -90,73 +91,60 @@ export async function action({ request }) {
       return json({ success: true, settings: result });
     }
 
-    if (intent === "create_fee_product") {
-      console.log("Creating handling fee product...");
+    if (intent === "update_fee_price") {
+      const settings = await getAppSettings(shopDomain);
+      if (!settings.handling_fee_product_gid || !settings.handling_fee_variant_gid) {
+        return json({ error: "Handling Fee product not set up yet. Create it first." }, { status: 400 });
+      }
+      const price = parseFloat(formData.get("fee_price"));
+      if (isNaN(price) || price < 0) {
+        return json({ error: "Invalid price amount." }, { status: 400 });
+      }
+      const response = await admin.graphql(UPDATE_VARIANT_MUTATION, {
+        variables: {
+          productId: settings.handling_fee_product_gid,
+          variants: [{ id: settings.handling_fee_variant_gid, price: price.toFixed(2) }],
+        },
+      });
+      const data = await response.json();
+      if (data.data?.productVariantsBulkUpdate?.userErrors?.length > 0) {
+        return json({ error: data.data.productVariantsBulkUpdate.userErrors[0].message }, { status: 400 });
+      }
+      const updatedPrice = data.data?.productVariantsBulkUpdate?.productVariants?.[0]?.price;
+      return json({ success: true, updatedPrice });
+    }
 
-      // Step 1: Create the product
+    if (intent === "create_fee_product") {
       const createResponse = await admin.graphql(CREATE_PRODUCT_MUTATION);
       const createData = await createResponse.json();
 
-      console.log("Create product response:", JSON.stringify(createData));
-
-      if (createData.errors) {
-        console.error("GraphQL errors:", createData.errors);
-        return json({ error: createData.errors[0].message }, { status: 400 });
-      }
-
       if (createData.data?.productCreate?.userErrors?.length > 0) {
-        const errMsg = createData.data.productCreate.userErrors[0].message;
-        console.error("Product create user error:", errMsg);
-        return json({ error: errMsg }, { status: 400 });
+        return json({ error: createData.data.productCreate.userErrors[0].message }, { status: 400 });
       }
 
       const product = createData.data?.productCreate?.product;
       if (!product) {
-        return json(
-          { error: "Product creation failed - no product returned" },
-          { status: 400 }
-        );
+        return json({ error: "Product creation failed — no product returned." }, { status: 400 });
       }
 
       const variantId = product.variants.edges[0]?.node?.id;
-      console.log("Product created:", product.id, "Variant:", variantId);
 
-      // Step 2: Update variant price to 0.00
+      // Set price to $0.00 initially
       if (variantId) {
-        const updateResponse = await admin.graphql(UPDATE_VARIANT_MUTATION, {
+        await admin.graphql(UPDATE_VARIANT_MUTATION, {
           variables: {
             productId: product.id,
-            variants: [
-              {
-                id: variantId,
-                price: "0.00",
-              },
-            ],
+            variants: [{ id: variantId, price: "0.00" }],
           },
         });
-        const updateData = await updateResponse.json();
-        console.log("Variant update response:", JSON.stringify(updateData));
-
-        if (updateData.data?.productVariantsBulkUpdate?.userErrors?.length > 0) {
-          console.error(
-            "Variant update error:",
-            updateData.data.productVariantsBulkUpdate.userErrors
-          );
-        }
       }
 
-      // Step 3: Save to app settings
       await updateAppSettings(shopDomain, {
         handling_fee_product_gid: product.id,
         handling_fee_variant_gid: variantId,
       });
 
-      return json({
-        success: true,
-        productId: product.id,
-        variantId,
-        productTitle: product.title,
-      });
+      return json({ success: true, productId: product.id, variantId, productTitle: product.title });
     }
 
     return json({ error: "Unknown intent" }, { status: 400 });
@@ -171,17 +159,21 @@ export default function SettingsPage() {
   const { settings } = useLoaderData();
   const submit = useSubmit();
   const fetcher = useFetcher();
+  const priceFetcher = useFetcher();
 
   const [appEnabled, setAppEnabled] = useState(settings.app_enabled ?? true);
-  const [defaultLabel, setDefaultLabel] = useState(
-    settings.default_fee_label || "Handling Fee"
-  );
-  const [conflictResolution, setConflictResolution] = useState(
-    settings.conflict_resolution || "highest"
-  );
+  const [defaultLabel, setDefaultLabel] = useState(settings.default_fee_label || "Handling Fee");
+  const [conflictResolution, setConflictResolution] = useState(settings.conflict_resolution || "highest");
+  const [feePrice, setFeePrice] = useState("");
   const [toastActive, setToastActive] = useState(false);
   const [toastMessage, setToastMessage] = useState("");
   const [toastError, setToastError] = useState(false);
+
+  function showToast(msg, error = false) {
+    setToastMessage(msg);
+    setToastError(error);
+    setToastActive(true);
+  }
 
   function handleSave() {
     const fd = new FormData();
@@ -190,9 +182,7 @@ export default function SettingsPage() {
     fd.append("default_fee_label", defaultLabel);
     fd.append("conflict_resolution", conflictResolution);
     submit(fd, { method: "post" });
-    setToastError(false);
-    setToastMessage("Settings saved");
-    setToastActive(true);
+    showToast("Settings saved");
   }
 
   function handleCreateProduct() {
@@ -201,23 +191,35 @@ export default function SettingsPage() {
     fetcher.submit(fd, { method: "post" });
   }
 
-  const isSubmitting =
-    fetcher.state === "submitting" || fetcher.state === "loading";
+  function handleUpdatePrice() {
+    if (!feePrice || isNaN(parseFloat(feePrice))) {
+      showToast("Please enter a valid price.", true);
+      return;
+    }
+    const fd = new FormData();
+    fd.append("intent", "update_fee_price");
+    fd.append("fee_price", feePrice);
+    priceFetcher.submit(fd, { method: "post" });
+  }
 
-  if (fetcher.state === "idle" && fetcher.data) {
-    if (fetcher.data.success && !toastActive) {
-      setToastError(false);
-      setToastMessage("Handling Fee product created successfully!");
-      setToastActive(true);
-    } else if (fetcher.data.error && !toastActive) {
-      setToastError(true);
-      setToastMessage(`Error: ${fetcher.data.error}`);
-      setToastActive(true);
+  const isCreating = fetcher.state === "submitting" || fetcher.state === "loading";
+  const isUpdatingPrice = priceFetcher.state === "submitting" || priceFetcher.state === "loading";
+
+  if (fetcher.state === "idle" && fetcher.data && !toastActive) {
+    if (fetcher.data.success) showToast("Handling Fee product created successfully!");
+    else if (fetcher.data.error) showToast(`Error: ${fetcher.data.error}`, true);
+  }
+
+  if (priceFetcher.state === "idle" && priceFetcher.data && !toastActive) {
+    if (priceFetcher.data.success) {
+      showToast(`Fee price updated to $${parseFloat(priceFetcher.data.updatedPrice).toFixed(2)}`);
+      setFeePrice("");
+    } else if (priceFetcher.data.error) {
+      showToast(`Error: ${priceFetcher.data.error}`, true);
     }
   }
 
-  const hasProduct =
-    settings.handling_fee_product_gid || fetcher.data?.productId;
+  const hasProduct = settings.handling_fee_product_gid || fetcher.data?.productId;
 
   return (
     <Frame>
@@ -227,29 +229,24 @@ export default function SettingsPage() {
         primaryAction={{ content: "Save Settings", onAction: handleSave }}
       >
         <Layout>
+          {/* ── Product Setup ── */}
           <Layout.Section>
             <Card>
               <BlockStack gap="400">
                 <BlockStack gap="100">
-                  <Text variant="headingMd" as="h2">
-                    Handling Fee Product Setup
-                  </Text>
+                  <Text variant="headingMd" as="h2">Handling Fee Product Setup</Text>
                   <Text tone="subdued">
-                    A Shopify product is required to add handling fees as line
-                    items at checkout.
+                    A Shopify product is used to add the handling fee as a line item at checkout.
+                    The product price is what customers are charged — set it once here.
                   </Text>
                 </BlockStack>
 
                 {hasProduct ? (
                   <Banner tone="success">
                     <BlockStack gap="100">
-                      <Text fontWeight="semibold">
-                        ✓ Handling Fee product is configured
-                      </Text>
+                      <Text fontWeight="semibold">✓ Handling Fee product is configured</Text>
                       <Text tone="subdued" variant="bodySm">
-                        Product GID:{" "}
-                        {settings.handling_fee_product_gid ||
-                          fetcher.data?.productId}
+                        Product GID: {settings.handling_fee_product_gid || fetcher.data?.productId}
                       </Text>
                     </BlockStack>
                   </Banner>
@@ -259,34 +256,61 @@ export default function SettingsPage() {
                       {fetcher.data?.error ? (
                         <Text>Error: {fetcher.data.error}</Text>
                       ) : (
-                        <Text>
-                          No handling fee product configured. Create one
-                          automatically below.
-                        </Text>
+                        <Text>No handling fee product configured. Create one automatically below.</Text>
                       )}
                       <Button
                         variant="primary"
                         onClick={handleCreateProduct}
-                        loading={isSubmitting}
-                        disabled={isSubmitting}
+                        loading={isCreating}
+                        disabled={isCreating}
                       >
-                        {isSubmitting
-                          ? "Creating..."
-                          : "Create Handling Fee Product Automatically"}
+                        {isCreating ? "Creating..." : "Create Handling Fee Product Automatically"}
                       </Button>
                     </BlockStack>
                   </Banner>
                 )}
 
-                <Divider />
+                {hasProduct && (
+                  <>
+                    <Divider />
+                    <BlockStack gap="200">
+                      <Text variant="bodyMd" fontWeight="semibold">Set Handling Fee Price</Text>
+                      <Text tone="subdued">
+                        This is the fixed amount charged to customers at checkout whenever a fee rule matches.
+                        Update it here anytime — no race conditions, no per-checkout price changes.
+                      </Text>
+                      <InlineStack gap="300" blockAlign="end">
+                        <div style={{ width: "160px" }}>
+                          <TextField
+                            label="Fee amount"
+                            type="number"
+                            value={feePrice}
+                            onChange={setFeePrice}
+                            prefix="$"
+                            placeholder="e.g. 10.00"
+                            autoComplete="off"
+                            helpText="Price on the Shopify product variant"
+                          />
+                        </div>
+                        <Button
+                          variant="primary"
+                          onClick={handleUpdatePrice}
+                          loading={isUpdatingPrice}
+                          disabled={isUpdatingPrice || !feePrice}
+                        >
+                          Update Price
+                        </Button>
+                      </InlineStack>
+                    </BlockStack>
+                  </>
+                )}
 
+                <Divider />
                 <BlockStack gap="200">
-                  <Text variant="bodyMd" fontWeight="semibold">
-                    Manual Setup Instructions
-                  </Text>
+                  <Text variant="bodyMd" fontWeight="semibold">Manual Setup Instructions</Text>
                   <Text>1. Go to Products → Add product in Shopify admin</Text>
                   <Text>2. Title it "Handling Fee"</Text>
-                  <Text>3. Set price to $0.00</Text>
+                  <Text>3. Set the price to your desired fee amount</Text>
                   <Text>4. Uncheck "Requires shipping"</Text>
                   <Text>5. Set inventory tracking to None</Text>
                   <Text>6. Hide from Online Store channel</Text>
@@ -295,12 +319,11 @@ export default function SettingsPage() {
             </Card>
           </Layout.Section>
 
+          {/* ── General Settings ── */}
           <Layout.Section>
             <Card>
               <BlockStack gap="400">
-                <Text variant="headingMd" as="h2">
-                  General Settings
-                </Text>
+                <Text variant="headingMd" as="h2">General Settings</Text>
                 <FormLayout>
                   <Select
                     label="App Status"
@@ -317,7 +340,7 @@ export default function SettingsPage() {
                     value={defaultLabel}
                     onChange={setDefaultLabel}
                     placeholder="Handling Fee"
-                    helpText="Used when a fee rule doesn't specify its own label"
+                    helpText="What customers see at checkout next to the fee line"
                     autoComplete="off"
                   />
                 </FormLayout>
@@ -325,16 +348,15 @@ export default function SettingsPage() {
             </Card>
           </Layout.Section>
 
+          {/* ── Conflict Resolution ── */}
           <Layout.Section>
             <Card>
               <BlockStack gap="400">
                 <BlockStack gap="100">
-                  <Text variant="headingMd" as="h2">
-                    Conflict Resolution
-                  </Text>
+                  <Text variant="headingMd" as="h2">Conflict Resolution</Text>
                   <Text tone="subdued">
-                    When a product belongs to a collection that has a fee rule
-                    AND the product itself has a fee rule, which fee applies?
+                    When a product belongs to a collection that has a fee rule AND the product
+                    itself has a fee rule, which rule wins?
                   </Text>
                 </BlockStack>
                 <Select
@@ -353,21 +375,17 @@ export default function SettingsPage() {
             </Card>
           </Layout.Section>
 
+          {/* ── Checkout Extension ── */}
           <Layout.Section>
             <Card>
               <BlockStack gap="400">
-                <Text variant="headingMd" as="h2">
-                  Checkout Extension
-                </Text>
+                <Text variant="headingMd" as="h2">Checkout Extension</Text>
                 <Banner tone="info">
                   <BlockStack gap="200">
-                    <Text fontWeight="semibold">
-                      Shopify Checkout Extension Required
-                    </Text>
+                    <Text fontWeight="semibold">Shopify Checkout Extension Required</Text>
                     <Text>
-                      This app uses a Shopify Checkout UI Extension to add
-                      handling fees. The extension must be activated in your
-                      checkout settings after deploying via Shopify CLI.
+                      This app uses a Shopify Checkout UI Extension to add handling fees.
+                      The extension must be activated in your checkout settings.
                     </Text>
                   </BlockStack>
                 </Banner>

@@ -1,7 +1,7 @@
 import { extension, Banner, Text, BlockStack } from "@shopify/ui-extensions/checkout";
 
 const APP_URL = "https://shopify-handling-fee.vercel.app";
-const DEBUG = true; // Set to false once fees are working
+const DEBUG = false;
 
 export default extension(
   "purchase.checkout.cart-line-list.render-after",
